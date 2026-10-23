@@ -148,44 +148,33 @@ def validate_target_url(url: str) -> str:
 
 
 def assess_evidence(url: str, evidence: dict | None) -> tuple[str, int, list[str], str]:
-    """Assess operator-supplied, independently verified host/package evidence.
+    """Describe supplied evidence without pretending to authenticate it.
 
-    This does not remotely collect evidence. The operator must verify it through
-    authenticated host access or trusted vendor package advisories.
+    A local JSON file cannot prove that a runtime/package claim is true. Boolean
+    fields such as runtime_verified are assertions by the file author only. They
+    therefore never produce a VERIFIED verdict or override the passive HTTP result.
     """
     if not evidence:
         return "", 0, [], "passive_http"
-    details = []
-    runtime = evidence.get("runtime_version")
-    runtime_verified = evidence.get("runtime_verified") is True
-    package_verified = evidence.get("package_verified") is True
-    vendor_fix_confirmed = evidence.get("vendor_fix_confirmed") is True
+
+    details = ["evidence supplied by operator; not independently authenticated by this scanner"]
+    runtime = str(evidence.get("runtime_version", "")).strip()
     source = str(evidence.get("evidence_source", "")).strip()
     package = str(evidence.get("package_version", "")).strip()
     if source:
-        details.append(f"operator evidence source: {source}")
+        details.append(f"operator-declared evidence source: {source}")
     if package:
-        details.append(f"package/build: {package}")
+        details.append(f"operator-declared package/build: {package}")
     if runtime:
-        details.append(f"runtime version supplied: {runtime}")
+        details.append(f"operator-declared runtime version: {runtime}")
 
-    # Explicit vendor confirmation overrides upstream version-string inference.
-    if vendor_fix_confirmed and (package_verified or runtime_verified):
-        details.append("operator marked vendor fix as verified; retain supporting evidence for audit")
-        return "FIX VERIFIED BY OPERATOR-SUPPLIED EVIDENCE", 95, details, "operator_verified"
-    parsed = parse_version(str(runtime)) if runtime else None
-    if runtime_verified and parsed:
-        patched = is_patched(parsed)
-        if patched is True:
-            return "FIXED VERSION VERIFIED (upstream threshold)", 95, details, "operator_verified"
-        if patched is False:
-            return "AFFECTED VERSION VERIFIED (upstream threshold)", 95, details, "operator_verified"
-        return "INCONCLUSIVE - verified runtime branch lacks known threshold", 45, details, "operator_verified"
-    if package_verified and package:
-        details.append("package verified, but package version is not mapped to an upstream runtime threshold")
-        return "INCONCLUSIVE - vendor/package interpretation required", 55, details, "operator_verified"
-    details.append("supplied evidence is not marked verified; treated as context only")
-    return "", 0, details, "operator_supplied_unverified"
+    vendor_fix_claim = evidence.get("vendor_fix_confirmed") is True
+    if vendor_fix_claim:
+        details.append("vendor_fix_confirmed is an operator assertion and has not been validated")
+
+    # Never promote user-supplied booleans into verified evidence. Keep these
+    # fields as context and let the passive HTTP assessment determine the verdict.
+    return "", 0, details, "operator_asserted_unverified"
 
 
 def scan_host(url: str, timeout: int, session: requests.Session, evidence: dict | None = None) -> HostResult:
@@ -262,13 +251,10 @@ def scan_host(url: str, timeout: int, session: requests.Session, evidence: dict 
         result.upload_progress_feature_hint = True
         result.signals.append("multipart file-upload form present (weak signal)")
 
-    # Operator-supplied verified evidence outranks public fingerprints. It is not
-    # automatically trusted: the JSON must explicitly mark runtime/package evidence verified.
-    if evidence_verdict:
-        result.verdict = evidence_verdict
-        result.confidence_score = evidence_score
+    # Evidence JSON is operator-asserted context only. It cannot override passive
+    # findings because this scanner cannot authenticate its provenance or contents.
+    if evidence_details:
         result.signals.extend(evidence_details)
-        return result
 
     # ---- Score & verdict -----------------------------------------------
     score = 0
