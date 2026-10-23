@@ -32,16 +32,16 @@ list down to a short list worth checking one at a time, by hand, in a controlled
 
 | Verdict | Meaning |
 |---|---|
-| HIGH CONFIDENCE - VULNERABLE | Disclosed PHP version falls in the affected range |
-| HIGH CONFIDENCE - PATCHED | Disclosed PHP version is at or above the patched release |
-| MEDIUM CONFIDENCE | CMS fingerprint matches a known-targeted stack, version unknown |
-| LOW CONFIDENCE | Weak or partial signal only |
-| UNKNOWN | No reliable signal found — **does not mean safe**, needs manual check |
+| POTENTIALLY AFFECTED | Disclosed PHP version is below the known fix for its supported branch; this is not proof the runtime is exploitable. |
+| PATCHED VERSION DISCLOSED | Disclosed version meets the upstream fixed threshold; runtime and vendor build remain unverified. |
+| INCONCLUSIVE | Version branch, vendor build, or evidence is insufficient; manual/vendor verification is required. |
+| MEDIUM / LOW CONFIDENCE | Heuristic CMS or upload-form clues only; not proof of vulnerability. |
+| UNKNOWN | No reliable signal found — **does not mean safe**; manual check required. |
 
-A "LOW CONFIDENCE" or "UNKNOWN" result is not a clean bill of health — most production
-servers correctly suppress version headers, so the *absence* of a signal is common and
-uninformative. Treat anything that isn't "HIGH CONFIDENCE - PATCHED" as needing a manual
-check.
+A passive HTTP check cannot prove exploitability or verify the PHP runtime behind a proxy.
+Even "PATCHED VERSION DISCLOSED" only describes the version string observed. Treat all
+results as triage evidence and verify the actual package/build through authenticated host
+access or the vendor.
 
 ## Install
 
@@ -66,27 +66,30 @@ Output is a CSV: `url, verdict, confidence_score, php_version, version_source, c
 ## Recommended workflow
 
 1. **Run this script** across your full URL list to get a ranked, scored CSV.
-2. **Anything "HIGH CONFIDENCE - VULNERABLE"** → patch immediately
-   (PHP 8.3.36 / 8.4.27 / 8.5.12), this is the priority list.
+2. **Anything "POTENTIALLY AFFECTED"** → verify the deployed package/build and prioritize
+   updating to the applicable fixed release (PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12).
 3. **Anything not "HIGH CONFIDENCE - PATCHED"** → spot-check manually:
    - SSH in and run `php -v` directly if you have access.
-   - Check `session.upload_progress.enabled` in `php.ini` — setting it `Off` closes
-     this specific vector even pre-patch.
-   - Only if you need to *confirm* exploitability (not just version), do so **one host
-     at a time, against a staging clone**, never production, and never in a batch loop.
+   - Check the effective PHP package/build and vendor advisory. Vendors may backport
+     fixes without changing the upstream-looking version string.
+   - Do not treat `session.upload_progress.enabled=Off` as a complete mitigation.
+     Updating to a fixed release is the recommended remediation; configuration changes
+     are not a substitute for patching. Do not use this passive tool to confirm exploitability.
 4. **Log sweep for prior exploitation** (this CVE is under active exploitation):
    search existing access/error logs for:
    - `PHP_SESSION_UPLOAD_PROGRESS` in POST bodies
    - Session IDs arriving via POST body instead of cookie
    - Unexplained PHP-FPM worker crashes/restarts before your patch date
-5. **Patch, then re-run this script** to confirm the fleet now reports patched versions
-   where headers are disclosed, and re-verify config (`upload_progress.enabled=Off`)
-   where they are not.
+5. **Patch, then re-run this script** as a limited external cross-check. Verify the
+   actual installed package/build through authenticated server-side checks, especially
+   where headers are hidden or vendor backports may apply.
 
 ## Limitations
 
-- Version headers are frequently suppressed in hardened production configs — this tool
-  will under-report in exactly those environments. No signal ≠ not vulnerable.
+- Version headers are frequently suppressed or rewritten by proxies. No signal does not
+  mean not vulnerable. Redirects are not followed, to avoid silently probing another host.
+- Upstream version thresholds are evidence only; vendor builds may backport fixes without
+  changing the displayed version. Verify package provenance with the vendor.
 - CMS fingerprinting is heuristic and can both false-positive and false-negative.
 - This tool makes no attempt to check `session.upload_progress.enabled` remotely —
   that requires server-side access (SSH/config review), not something observable
