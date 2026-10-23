@@ -51,7 +51,7 @@ except ImportError:
 # Patched versions per branch (PHP project emergency release, 2026-10-21)
 # ---------------------------------------------------------------------------
 PATCHED_VERSIONS = {
-    8: {5: 12, 4: 27, 3: 36},
+    8: {5: 12, 4: 27, 3: 36, 2: 35},
 }
 
 # Common paths that sometimes leak version info or config state.
@@ -135,7 +135,7 @@ def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
             resp = session.get(
                 target,
                 timeout=timeout,
-                allow_redirects=True,
+                allow_redirects=False,
                 headers={"User-Agent": "php2shell-passive-triage/1.0"},
             )
         except requests.RequestException as e:
@@ -190,13 +190,13 @@ def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
     if version_tuple:
         if patched is True:
             score = 90
-            result.verdict = "HIGH CONFIDENCE - PATCHED"
+            result.verdict = "PATCHED VERSION DISCLOSED - runtime/vendor build unverified"
         elif patched is False:
             score = 90
-            result.verdict = "HIGH CONFIDENCE - VULNERABLE (version in affected range)"
+            result.verdict = "POTENTIALLY AFFECTED - disclosed version in affected range"
         else:
             score = 40
-            result.verdict = "LOW CONFIDENCE - version disclosed but branch not in known-affected map, verify manually"
+            result.verdict = "INCONCLUSIVE - disclosed version branch needs manual/vendor verification"
     else:
         if cms_hits:
             score = 55
@@ -251,7 +251,7 @@ def main():
             results.append(res)
             print(f"[{i}/{len(urls)}] {url} -> {res.verdict} (score {res.confidence_score})")
 
-    results.sort(key=lambda r: -r.confidence_score if "VULNERABLE" in r.verdict else -1)
+    results.sort(key=lambda r: (0 if "POTENTIALLY AFFECTED" in r.verdict else 1, -r.confidence_score, r.url.lower()))
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f)
