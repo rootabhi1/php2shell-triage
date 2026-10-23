@@ -238,10 +238,10 @@ def main():
     print("NOTE: passive checks only - no exploit payloads sent.\n")
 
     results = []
-    session = requests.Session()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        future_map = {executor.submit(scan_host, url, args.timeout, session): url for url in urls}
+        # Avoid sharing mutable requests.Session state between worker threads.
+        future_map = {executor.submit(scan_host, url, args.timeout, requests.Session()): url for url in urls}
         for i, future in enumerate(concurrent.futures.as_completed(future_map), 1):
             url = future_map[future]
             try:
@@ -267,10 +267,10 @@ def main():
             ])
 
     print(f"\nDone. Results written to {args.output}")
-    vulnerable = [r for r in results if "VULNERABLE" in r.verdict]
+    vulnerable = [r for r in results if "POTENTIALLY AFFECTED" in r.verdict]
     if vulnerable:
-        print(f"\n{len(vulnerable)} host(s) flagged HIGH CONFIDENCE VULNERABLE - "
-              f"prioritize these for patching and/or isolated staging verification:")
+        print(f"\n{len(vulnerable)} host(s) have a disclosed version below the known fix threshold - "
+              f"verify package status and prioritize patching:")
         for r in vulnerable:
             print(f"  - {r.url} (PHP {r.php_version})")
 
