@@ -1,9 +1,47 @@
 import unittest
 
-from php2shell_triage import extract_version_from_headers, is_patched, parse_version
+from php2shell_triage import (
+    assess_evidence, extract_version_from_headers, is_patched,
+    parse_version, validate_target_url,
+)
 
 
 class VersionAssessmentTests(unittest.TestCase):
+    def test_rejects_unsupported_or_credentialed_urls(self):
+        for url in ("file:///etc/passwd", "ftp://example.com", "https://user:pass@example.com", "https:///missing-host"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                validate_target_url(url)
+
+    def test_normalizes_url_and_removes_fragment(self):
+        self.assertEqual(
+            validate_target_url("HTTPS://example.com/path#fragment"),
+            "https://example.com/path",
+        )
+
+    def test_operator_assertions_never_claim_verified_evidence(self):
+        verdict, score, details, level = assess_evidence(
+            "https://example.com",
+            {
+                "runtime_version": "8.3.35",
+                "runtime_verified": True,
+                "package_verified": True,
+                "vendor_fix_confirmed": True,
+                "evidence_source": "operator supplied",
+            },
+        )
+        self.assertEqual(verdict, "")
+        self.assertEqual(score, 0)
+        self.assertEqual(level, "operator_asserted_unverified")
+        self.assertTrue(any("not independently authenticated" in item for item in details))
+        self.assertTrue(any("operator assertion" in item for item in details))
+
+    def test_empty_evidence_does_not_change_passive_mode(self):
+        verdict, score, details, level = assess_evidence("https://example.com", {})
+        self.assertEqual(verdict, "")
+        self.assertEqual(score, 0)
+        self.assertEqual(details, [])
+        self.assertEqual(level, "passive_http")
+
     def test_parse_version(self):
         self.assertEqual(parse_version("8.3.36"), (8, 3, 36))
         self.assertIsNone(parse_version("unknown"))
