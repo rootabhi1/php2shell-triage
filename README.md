@@ -20,6 +20,8 @@ list down to a short list worth checking one at a time, by hand, in a controlled
 
 ## What it checks
 
+This is deliberately a passive, low-coverage inventory aid. It does not detect the vulnerable code path, test exploitability, or establish that a particular PHP deployment is affected.
+
 - `Server` / `X-Powered-By` headers for an explicit PHP version string
 - Whether that version falls in the affected range (PHP 8.2 < 8.2.35, 8.3 < 8.3.36, 8.4 < 8.4.27, or 8.5 < 8.5.12 (older/EOL branches require vendor-specific review))
 - Exposed `composer.json` / `composer.lock` for a platform PHP requirement hint
@@ -61,14 +63,14 @@ python3 php2shell_triage.py -i urls.txt -o results.csv
 python3 php2shell_triage.py -i urls.txt -o results.csv --timeout 8 --workers 10
 ```
 
-Output is a CSV: `url, verdict, confidence_score, php_version, version_source, cms_detected, signals, errors`.
+Output is a CSV: `url, verdict, confidence_score, php_version, version_source, cms_detected, signals, errors`. The score is a heuristic prioritization value, not a calibrated probability of exploitability.
 
 ## Recommended workflow
 
 1. **Run this script** across your full URL list to get a ranked, scored CSV.
 2. **Anything "POTENTIALLY AFFECTED"** → verify the deployed package/build and prioritize
    updating to the applicable fixed release (PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12).
-3. **Anything not "HIGH CONFIDENCE - PATCHED"** → spot-check manually:
+3. **Anything other than "PATCHED VERSION DISCLOSED"** → spot-check manually:
    - SSH in and run `php -v` directly if you have access.
    - Check the effective PHP package/build and vendor advisory. Vendors may backport
      fixes without changing the upstream-looking version string.
@@ -99,6 +101,6 @@ Output is a CSV: `url, verdict, confidence_score, php_version, version_source, c
 
 ## References
 
-- PHP project emergency release notes, 2026-10-21 (CVE-2026-109618 / CVE-2026-109619) — verify the current fixed versions and vendor advisories before operational use
+- [PHP security advisory and fixed release announcements](https://www.php.net/?p=6507) (CVE-2026-109618 / CVE-2026-109619); verify current fixed versions and vendor advisories before operational use
 - Wiz research on unauthenticated RCE against WordPress/Drupal/Joomla via this chain
 - Recorded Future / Abstract Security writeups on detection signatures (Suricata, ModSecurity)
