@@ -1,6 +1,9 @@
 import unittest
 
-from php2shell_triage import (\n    assess_evidence, extract_version_from_headers, is_patched,\n    parse_version, validate_target_url,\n)
+from php2shell_triage import (
+    assess_evidence, extract_version_from_headers, is_patched,
+    parse_version, validate_target_url,
+)
 
 
 class VersionAssessmentTests(unittest.TestCase):
