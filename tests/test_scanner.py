@@ -1,9 +1,51 @@
 import unittest
 
-from php2shell_triage import extract_version_from_headers, is_patched, parse_version
+from php2shell_triage import (\n    assess_evidence, extract_version_from_headers, is_patched,\n    parse_version, validate_target_url,\n)
 
 
 class VersionAssessmentTests(unittest.TestCase):
+    def test_rejects_unsupported_or_credentialed_urls(self):
+        for url in ("file:///etc/passwd", "ftp://example.com", "https://user:pass@example.com", "https:///missing-host"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                validate_target_url(url)
+
+    def test_normalizes_url_and_removes_fragment(self):
+        self.assertEqual(
+            validate_target_url("HTTPS://example.com/path#fragment"),
+            "https://example.com/path",
+        )
+
+    def test_unverified_evidence_cannot_override_passive_verdict(self):
+        verdict, score, details, level = assess_evidence(
+            "https://example.com",
+            {"runtime_version": "8.3.35", "runtime_verified": False},
+        )
+        self.assertEqual(verdict, "")
+        self.assertEqual(score, 0)
+        self.assertEqual(level, "operator_supplied_unverified")
+        self.assertTrue(details)
+
+    def test_verified_runtime_evidence_has_explicit_verdict(self):
+        verdict, score, details, level = assess_evidence(
+            "https://example.com",
+            {
+                "runtime_version": "8.3.35",
+                "runtime_verified": True,
+                "evidence_source": "authenticated package inventory",
+            },
+        )
+        self.assertEqual(verdict, "AFFECTED VERSION VERIFIED (upstream threshold)")
+        self.assertEqual(score, 95)
+        self.assertEqual(level, "operator_verified")
+
+    def test_verified_fixed_runtime_evidence(self):
+        verdict, score, details, level = assess_evidence(
+            "https://example.com",
+            {"runtime_version": "8.3.36", "runtime_verified": True},
+        )
+        self.assertEqual(verdict, "FIXED VERSION VERIFIED (upstream threshold)")
+        self.assertEqual(level, "operator_verified")
+
     def test_parse_version(self):
         self.assertEqual(parse_version("8.3.36"), (8, 3, 36))
         self.assertIsNone(parse_version("unknown"))
