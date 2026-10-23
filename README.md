@@ -63,14 +63,49 @@ python3 php2shell_triage.py -i urls.txt -o results.csv
 python3 php2shell_triage.py -i urls.txt -o results.csv --timeout 8 --workers 10
 ```
 
-Output is a CSV: `url, verdict, confidence_score, php_version, version_source, cms_detected, signals, errors`. The score is a heuristic prioritization value, not a calibrated probability of exploitability.
+Output is a CSV with the observed PHP version, verdict, score, evidence level/details, signals, and errors. The score is a heuristic prioritization value, not a calibrated probability of exploitability.
+
+## Evidence-based verdicts
+
+By default, the scanner still performs passive HTTP checks. It cannot safely prove remote code execution or test the vulnerable memory-corruption path. For stronger conclusions, pass an optional JSON file with runtime/package evidence obtained independently through authenticated host access or a trusted vendor inventory. The scanner does not collect or authenticate that evidence itself.
+
+Example `evidence.json`:
+
+```json
+{
+  "https://example.com/": {
+    "runtime_version": "8.3.35",
+    "runtime_verified": true,
+    "package_verified": true,
+    "evidence_source": "authenticated package inventory collected by the operator",
+    "package_version": "php8.3-fpm vendor-build-123",
+    "vendor_fix_confirmed": false,
+    "notes": "Keep the supporting inventory record in your audit system."
+  }
+}
+```
+
+Run with:
+
+```bash
+python3 php2shell_triage.py -i urls.txt -o results.csv --evidence evidence.json
+```
+
+Supported evidence fields:
+- `runtime_version`: exact PHP runtime version observed by the operator.
+- `runtime_verified`: set to `true` only when verified through authenticated runtime/package inventory.
+- `package_verified`: marks package/build provenance as independently verified; it does not alone prove the fix status.
+- `vendor_fix_confirmed`: set to `true` only when an authoritative vendor advisory or package record confirms the fix and the package/runtime is verified.
+- `evidence_source` and `package_version`: audit context displayed in the CSV.
+
+Only explicitly verified evidence overrides a passive banner-based assessment. Evidence values are operator-supplied, not remotely validated by this program; preserve the supporting records. The tool never sends an exploit payload and does not claim proof of exploitability.
 
 ## Recommended workflow
 
 1. **Run this script** across your full URL list to get a ranked, scored CSV.
 2. **Anything "POTENTIALLY AFFECTED"** → verify the deployed package/build and prioritize
    updating to the applicable fixed release (PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12).
-3. **Anything other than "PATCHED VERSION DISCLOSED"** → spot-check manually:
+3. **Anything other than a verified fix verdict** → spot-check manually:
    - SSH in and run `php -v` directly if you have access.
    - Check the effective PHP package/build and vendor advisory. Vendors may backport
      fixes without changing the upstream-looking version string.
