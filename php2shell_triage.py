@@ -39,6 +39,8 @@ import csv
 import re
 import sys
 import concurrent.futures
+import json
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -87,6 +89,8 @@ class HostResult:
     errors: list = field(default_factory=list)
     confidence_score: int = 0
     verdict: str = ""
+    evidence_level: str = "passive_http"
+    evidence_details: list = field(default_factory=list)
 
 
 def parse_version(version_str: str):
@@ -125,9 +129,78 @@ def extract_version_from_headers(headers: dict):
     return None, None
 
 
-def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
+def validate_target_url(url: str) -> str:
+    """Validate a target URL and normalize it without credentials or fragments."""
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port  # Force validation of malformed ports.
+    except ValueError as exc:
+        raise ValueError(f"invalid URL: {exc}") from exc
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError("only http:// and https:// URLs are supported")
+    if not parsed.hostname:
+        raise ValueError("URL must include a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing embedded credentials are not allowed")
+    if parsed.fragment:
+        parsed = parsed._replace(fragment="")
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
+def assess_evidence(url: str, evidence: dict | None) -> tuple[str, int, list[str], str]:
+    """Assess operator-supplied, independently verified host/package evidence.
+
+    This does not remotely collect evidence. The operator must verify it through
+    authenticated host access or trusted vendor package advisories.
+    """
+    if not evidence:
+        return "", 0, [], "passive_http"
+    details = []
+    runtime = evidence.get("runtime_version")
+    runtime_verified = evidence.get("runtime_verified") is True
+    package_verified = evidence.get("package_verified") is True
+    vendor_fix_confirmed = evidence.get("vendor_fix_confirmed") is True
+    source = str(evidence.get("evidence_source", "")).strip()
+    package = str(evidence.get("package_version", "")).strip()
+    if source:
+        details.append(f"operator evidence source: {source}")
+    if package:
+        details.append(f"package/build: {package}")
+    if runtime:
+        details.append(f"runtime version supplied: {runtime}")
+
+    # Explicit vendor confirmation overrides upstream version-string inference.
+    if vendor_fix_confirmed and (package_verified or runtime_verified):
+        details.append("operator marked vendor fix as verified; retain supporting evidence for audit")
+        return "FIX VERIFIED BY OPERATOR-SUPPLIED EVIDENCE", 95, details, "operator_verified"
+    parsed = parse_version(str(runtime)) if runtime else None
+    if runtime_verified and parsed:
+        patched = is_patched(parsed)
+        if patched is True:
+            return "FIXED VERSION VERIFIED (upstream threshold)", 95, details, "operator_verified"
+        if patched is False:
+            return "AFFECTED VERSION VERIFIED (upstream threshold)", 95, details, "operator_verified"
+        return "INCONCLUSIVE - verified runtime branch lacks known threshold", 45, details, "operator_verified"
+    if package_verified and package:
+        details.append("package verified, but package version is not mapped to an upstream runtime threshold")
+        return "INCONCLUSIVE - vendor/package interpretation required", 55, details, "operator_verified"
+    details.append("supplied evidence is not marked verified; treated as context only")
+    return "", 0, details, "operator_supplied_unverified"
+
+
+def scan_host(url: str, timeout: int, session: requests.Session, evidence: dict | None = None) -> HostResult:
     result = HostResult(url=url)
-    base = url.rstrip("/")
+    try:
+        normalized_url = validate_target_url(url)
+    except ValueError as exc:
+        result.verdict = "INVALID INPUT - URL rejected"
+        result.errors.append(str(exc))
+        result.confidence_score = 0
+        return result
+    base = normalized_url.rstrip("/")
+    evidence_verdict, evidence_score, evidence_details, evidence_level = assess_evidence(normalized_url, evidence)
+    result.evidence_details.extend(evidence_details)
+    result.evidence_level = evidence_level
 
     combined_text_sample = ""
     found_version = None
@@ -186,6 +259,14 @@ def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
         result.upload_progress_feature_hint = True
         result.signals.append("multipart file-upload form present (weak signal)")
 
+    # Operator-supplied verified evidence outranks public fingerprints. It is not
+    # automatically trusted: the JSON must explicitly mark runtime/package evidence verified.
+    if evidence_verdict:
+        result.verdict = evidence_verdict
+        result.confidence_score = evidence_score
+        result.signals.extend(evidence_details)
+        return result
+
     # ---- Score & verdict -----------------------------------------------
     score = 0
     version_tuple = parse_version(found_version) if found_version else None
@@ -230,6 +311,7 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="Output CSV path")
     parser.add_argument("--timeout", type=int, default=8, help="Per-request timeout in seconds (default 8)")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent workers (default 8)")
+    parser.add_argument("--evidence", help="Optional JSON file containing independently verified runtime/package evidence keyed by normalized URL")
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -237,6 +319,20 @@ def main():
 
     if not urls:
         sys.exit("No URLs found in input file.")
+    if args.timeout <= 0 or args.workers <= 0:
+        sys.exit("--timeout and --workers must be positive integers.")
+
+    evidence_map = {}
+    if args.evidence:
+        try:
+            with open(args.evidence, encoding="utf-8") as evidence_file:
+                evidence_map = json.load(evidence_file)
+            if not isinstance(evidence_map, dict):
+                raise ValueError("top-level JSON value must be an object keyed by URL")
+            if any(not isinstance(value, dict) for value in evidence_map.values()):
+                raise ValueError("each URL evidence entry must be a JSON object")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            sys.exit(f"Unable to read evidence file: {exc}")
 
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Scanning {len(urls)} URL(s) "
           f"with {args.workers} workers, {args.timeout}s timeout each...")
@@ -246,7 +342,14 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
         # Avoid sharing mutable requests.Session state between worker threads.
-        future_map = {executor.submit(scan_host, url, args.timeout, requests.Session()): url for url in urls}
+        future_map = {}
+        for url in urls:
+            try:
+                normalized = validate_target_url(url)
+                evidence = evidence_map.get(normalized)
+            except ValueError:
+                evidence = None
+            future_map[executor.submit(scan_host, url, args.timeout, requests.Session(), evidence): url] = url
         for i, future in enumerate(concurrent.futures.as_completed(future_map), 1):
             url = future_map[future]
             try:
@@ -262,13 +365,13 @@ def main():
         writer = csv.writer(f)
         writer.writerow([
             "url", "verdict", "confidence_score", "php_version",
-            "version_source", "cms_detected", "signals", "errors"
+            "version_source", "cms_detected", "evidence_level", "evidence_details", "signals", "errors"
         ])
         for r in results:
             writer.writerow([
                 r.url, r.verdict, r.confidence_score, r.php_version,
-                r.version_source, r.cms_detected,
-                " | ".join(r.signals), " | ".join(r.errors),
+                r.version_source, r.cms_detected, r.evidence_level,
+                " | ".join(r.evidence_details), " | ".join(r.signals), " | ".join(r.errors),
             ])
 
     print(f"\nDone. Results written to {args.output}")
