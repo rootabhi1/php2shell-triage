@@ -39,6 +39,8 @@ import csv
 import re
 import sys
 import concurrent.futures
+import json
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -87,6 +89,8 @@ class HostResult:
     errors: list = field(default_factory=list)
     confidence_score: int = 0
     verdict: str = ""
+    evidence_level: str = "passive_http"
+    evidence_details: list = field(default_factory=list)
 
 
 def parse_version(version_str: str):
@@ -125,9 +129,61 @@ def extract_version_from_headers(headers: dict):
     return None, None
 
 
-def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
+def validate_target_url(url: str) -> str:
+    """Validate and normalize an HTTP(S) target URL."""
+    try:
+        parsed = urlsplit(url)
+        _ = parsed.port  # Force validation of malformed ports.
+    except ValueError as exc:
+        raise ValueError(f"invalid URL: {exc}") from exc
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError("only http:// and https:// URLs are supported")
+    if not parsed.hostname:
+        raise ValueError("URL must include a hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing embedded credentials are not allowed")
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
+def assess_evidence(evidence: dict | None) -> tuple[list[str], str]:
+    """Record operator-supplied context without treating it as verified.
+
+    JSON booleans and descriptions are claims by the file author. This scanner
+    does not authenticate the file or corroborate its contents.
+    """
+    if not evidence:
+        return [], "passive_http"
+
+    details = ["operator-supplied evidence; not independently authenticated by this scanner"]
+    for field_name, label in (
+        ("runtime_version", "operator-declared runtime version"),
+        ("package_version", "operator-declared package/build"),
+        ("evidence_source", "operator-declared evidence source"),
+    ):
+        value = str(evidence.get(field_name, "")).strip()
+        if value:
+            details.append(f"{label}: {value}")
+
+    if any(evidence.get(key) is True for key in ("runtime_verified", "package_verified", "vendor_fix_confirmed")):
+        details.append("verification flags are unverified operator assertions, not proof")
+    return details, "operator_asserted_unverified"
+
+
+def scan_host(url: str, timeout: int, session: requests.Session, evidence: dict | None = None) -> HostResult:
     result = HostResult(url=url)
-    base = url.rstrip("/")
+    try:
+        normalized_url = validate_target_url(url)
+    except ValueError as exc:
+        result.verdict = "INVALID INPUT - URL rejected"
+        result.errors.append(str(exc))
+        return result
+
+    parsed_target = urlsplit(normalized_url)
+    base_path = parsed_target.path.rstrip("/")
+    base = urlunsplit((parsed_target.scheme, parsed_target.netloc, base_path, "", "")).rstrip("/")
+    evidence_details, evidence_level = assess_evidence(evidence)
+    result.evidence_details.extend(evidence_details)
+    result.evidence_level = evidence_level
 
     combined_text_sample = ""
     found_version = None
@@ -186,6 +242,11 @@ def scan_host(url: str, timeout: int, session: requests.Session) -> HostResult:
         result.upload_progress_feature_hint = True
         result.signals.append("multipart file-upload form present (weak signal)")
 
+    # Evidence supplied in JSON is context only; it never overrides observed HTTP
+    # results or produces a verified verdict.
+    if evidence_details:
+        result.signals.extend(evidence_details)
+
     # ---- Score & verdict -----------------------------------------------
     score = 0
     version_tuple = parse_version(found_version) if found_version else None
@@ -230,6 +291,7 @@ def main():
     parser.add_argument("-o", "--output", required=True, help="Output CSV path")
     parser.add_argument("--timeout", type=int, default=8, help="Per-request timeout in seconds (default 8)")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent workers (default 8)")
+    parser.add_argument("--evidence", help="Optional JSON file of operator-supplied runtime/package context keyed by normalized URL")
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -237,6 +299,18 @@ def main():
 
     if not urls:
         sys.exit("No URLs found in input file.")
+    if args.timeout <= 0 or args.workers <= 0:
+        sys.exit("--timeout and --workers must be positive integers.")
+
+    evidence_map = {}
+    if args.evidence:
+        try:
+            with open(args.evidence, encoding="utf-8") as evidence_file:
+                evidence_map = json.load(evidence_file)
+            if not isinstance(evidence_map, dict) or any(not isinstance(v, dict) for v in evidence_map.values()):
+                raise ValueError("expected a JSON object mapping URLs to evidence objects")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            sys.exit(f"Unable to read evidence file: {exc}")
 
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Scanning {len(urls)} URL(s) "
           f"with {args.workers} workers, {args.timeout}s timeout each...")
@@ -246,7 +320,14 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
         # Avoid sharing mutable requests.Session state between worker threads.
-        future_map = {executor.submit(scan_host, url, args.timeout, requests.Session()): url for url in urls}
+        future_map = {}
+        for url in urls:
+            try:
+                normalized = validate_target_url(url)
+                evidence = evidence_map.get(normalized)
+            except ValueError:
+                evidence = None
+            future_map[executor.submit(scan_host, url, args.timeout, requests.Session(), evidence): url] = url
         for i, future in enumerate(concurrent.futures.as_completed(future_map), 1):
             url = future_map[future]
             try:
@@ -262,13 +343,13 @@ def main():
         writer = csv.writer(f)
         writer.writerow([
             "url", "verdict", "confidence_score", "php_version",
-            "version_source", "cms_detected", "signals", "errors"
+            "version_source", "cms_detected", "evidence_level", "evidence_details", "signals", "errors"
         ])
         for r in results:
             writer.writerow([
                 r.url, r.verdict, r.confidence_score, r.php_version,
-                r.version_source, r.cms_detected,
-                " | ".join(r.signals), " | ".join(r.errors),
+                r.version_source, r.cms_detected, r.evidence_level,
+                " | ".join(r.evidence_details), " | ".join(r.signals), " | ".join(r.errors),
             ])
 
     print(f"\nDone. Results written to {args.output}")

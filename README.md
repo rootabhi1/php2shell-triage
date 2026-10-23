@@ -27,8 +27,7 @@ This is deliberately a passive, low-coverage inventory aid. It does not detect t
 - Exposed `composer.json` / `composer.lock` for a platform PHP requirement hint
 - CMS fingerprints for WordPress / Drupal / Joomla (the stacks publicly demonstrated as
   exploitable via this chain)
-- Presence of multipart file-upload forms (very weak signal — `upload_progress` is a
-  long-standing PHP default, so this only nudges confidence, never asserts vulnerability)
+- Presence of multipart file-upload forms (weak contextual signal only; it does not establish that the vulnerable PHP path is reachable)
 
 ## Verdict buckets
 
@@ -63,14 +62,40 @@ python3 php2shell_triage.py -i urls.txt -o results.csv
 python3 php2shell_triage.py -i urls.txt -o results.csv --timeout 8 --workers 10
 ```
 
-Output is a CSV: `url, verdict, confidence_score, php_version, version_source, cms_detected, signals, errors`. The score is a heuristic prioritization value, not a calibrated probability of exploitability.
+Output is a CSV with observed PHP version, verdict, score, evidence level/details, signals, and errors. The score is a heuristic prioritization value, not a calibrated probability of exploitability.
+
+## Operator-supplied evidence (unverified context)
+
+You can attach additional context collected separately through authenticated host access or vendor inventory using `--evidence evidence.json`. The scanner does not authenticate this file or corroborate its contents. Boolean fields such as `runtime_verified`, `package_verified`, and `vendor_fix_confirmed` are only claims made by the JSON author. They do not create a verified verdict, override HTTP findings, or increase the confidence score.
+
+Example:
+
+```json
+{
+  "https://example.com/": {
+    "runtime_version": "8.3.35",
+    "runtime_verified": true,
+    "package_verified": true,
+    "evidence_source": "operator-declared package inventory",
+    "package_version": "php8.3-fpm vendor build"
+  }
+}
+```
+
+Run with:
+
+```bash
+python3 php2shell_triage.py -i urls.txt -o results.csv --evidence evidence.json
+```
+
+The evidence is recorded as operator-asserted, unverified context only. To establish patch status, independently inspect the authenticated runtime/package inventory and corroborate the exact build against authoritative vendor guidance. This scanner does not currently perform that verification itself.
 
 ## Recommended workflow
 
 1. **Run this script** across your full URL list to get a ranked, scored CSV.
 2. **Anything "POTENTIALLY AFFECTED"** → verify the deployed package/build and prioritize
    updating to the applicable fixed release (PHP 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12).
-3. **Anything other than "PATCHED VERSION DISCLOSED"** → spot-check manually:
+3. **Anything other than a version-banner indication of a fix** → verify manually:
    - SSH in and run `php -v` directly if you have access.
    - Check the effective PHP package/build and vendor advisory. Vendors may backport
      fixes without changing the upstream-looking version string.
