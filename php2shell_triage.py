@@ -102,11 +102,16 @@ def is_patched(version_tuple):
     if not version_tuple:
         return None
     major, minor, patch = version_tuple
+    # Upstream has not released fixes for PHP 8.1 and older EOL branches.
+    # These versions must not be treated as "unknown/safe" merely because they
+    # are absent from the fixed-version map.
+    if major < 8 or (major == 8 and minor <= 1):
+        return False
+
     branch = PATCHED_VERSIONS.get(major, {})
     fixed_patch = branch.get(minor)
     if fixed_patch is None:
-        # Branch not in our known-affected map at all (e.g. PHP 7.x very old,
-        # or a future branch not yet catalogued) -> unknown, needs manual check.
+        # Unknown/newer branches need current vendor/upstream verification.
         return None
     return patch >= fixed_patch
 
