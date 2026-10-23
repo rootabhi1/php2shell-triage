@@ -197,7 +197,10 @@ def scan_host(url: str, timeout: int, session: requests.Session, evidence: dict 
         result.errors.append(str(exc))
         result.confidence_score = 0
         return result
-    base = normalized_url.rstrip("/")
+    parsed_target = urlsplit(normalized_url)
+    # Ignore query strings when constructing standard path probes.
+    base_path = parsed_target.path.rstrip("/")
+    base = urlunsplit((parsed_target.scheme, parsed_target.netloc, base_path, "", "")).rstrip("/")
     evidence_verdict, evidence_score, evidence_details, evidence_level = assess_evidence(normalized_url, evidence)
     result.evidence_details.extend(evidence_details)
     result.evidence_level = evidence_level
