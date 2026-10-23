@@ -18,36 +18,29 @@ class VersionAssessmentTests(unittest.TestCase):
             "https://example.com/path",
         )
 
-    def test_unverified_evidence_cannot_override_passive_verdict(self):
-        verdict, score, details, level = assess_evidence(
-            "https://example.com",
-            {"runtime_version": "8.3.35", "runtime_verified": False},
-        )
-        self.assertEqual(verdict, "")
-        self.assertEqual(score, 0)
-        self.assertEqual(level, "operator_supplied_unverified")
-        self.assertTrue(details)
-
-    def test_verified_runtime_evidence_has_explicit_verdict(self):
+    def test_operator_assertions_never_claim_verified_evidence(self):
         verdict, score, details, level = assess_evidence(
             "https://example.com",
             {
                 "runtime_version": "8.3.35",
                 "runtime_verified": True,
-                "evidence_source": "authenticated package inventory",
+                "package_verified": True,
+                "vendor_fix_confirmed": True,
+                "evidence_source": "operator supplied",
             },
         )
-        self.assertEqual(verdict, "AFFECTED VERSION VERIFIED (upstream threshold)")
-        self.assertEqual(score, 95)
-        self.assertEqual(level, "operator_verified")
+        self.assertEqual(verdict, "")
+        self.assertEqual(score, 0)
+        self.assertEqual(level, "operator_asserted_unverified")
+        self.assertTrue(any("not independently authenticated" in item for item in details))
+        self.assertTrue(any("operator assertion" in item for item in details))
 
-    def test_verified_fixed_runtime_evidence(self):
-        verdict, score, details, level = assess_evidence(
-            "https://example.com",
-            {"runtime_version": "8.3.36", "runtime_verified": True},
-        )
-        self.assertEqual(verdict, "FIXED VERSION VERIFIED (upstream threshold)")
-        self.assertEqual(level, "operator_verified")
+    def test_empty_evidence_does_not_change_passive_mode(self):
+        verdict, score, details, level = assess_evidence("https://example.com", {})
+        self.assertEqual(verdict, "")
+        self.assertEqual(score, 0)
+        self.assertEqual(details, [])
+        self.assertEqual(level, "passive_http")
 
     def test_parse_version(self):
         self.assertEqual(parse_version("8.3.36"), (8, 3, 36))
